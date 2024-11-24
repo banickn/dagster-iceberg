@@ -80,7 +80,8 @@ def setup_iceberg_tables(
         cron_schedule="0 * * * *"
     ),
     group_name="ingestion",
-    compute_kind="python"
+    compute_kind="python",
+    config_schema={"filename": str}  # Add config schema for filename
 )
 def ingest_raw_fab_data(context: AssetExecutionContext) -> Output[List[str]]:
     """
@@ -92,18 +93,9 @@ def ingest_raw_fab_data(context: AssetExecutionContext) -> Output[List[str]]:
         config.storage_options["connection_string"]
     )
 
-    # # Get list of processed files from metadata (for idempotency)
-    # processed_files = context.instance.get_latest_materialization_events(
-    #     asset_key=context.asset_key
-    # )
-    # processed_filenames = set(
-    #     event.materialization.metadata.get("processed_files", [])
-    #     for event in processed_files
-    # )
-
     processed_in_this_run = []
     failed_files = []
-    filename = "semi_data-2024-11-22T09:28:27.685750.json"
+    filename = context.op_config["filename"]
     file_path = Path("../raw_data") / filename
     if not file_path.exists():
         raise FileNotFoundError(f"Input file not found: {file_path}")
