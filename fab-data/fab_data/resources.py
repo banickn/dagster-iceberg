@@ -10,8 +10,9 @@ class IcebergCatalogResource(ConfigurableResource):
     account_name: str = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
     account_key: str = os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
     silver_container: str = os.getenv("AZURE_SILVER_CONTAINER_NAME")
+    gold_container: str = os.getenv("AZURE_GOLD_CONTAINER_NAME")
 
-    def get_catalog(self) -> SqlCatalog:
+    def get_catalog(self, stage: str) -> SqlCatalog:
         """Initialize and configure the Iceberg catalog."""
         file_io = PyArrowFileIO(
             properties={
@@ -20,15 +21,16 @@ class IcebergCatalogResource(ConfigurableResource):
                 "adls.account-key": self.account_key,
             }
         )
-
-        warehouse_path = f"abfs://{self.silver_container}@{self.account_name}.dfs.core.windows.net/"
-
+        if stage == 'silver':
+            warehouse_path = f"abfs://{self.silver_container}@{self.account_name}.dfs.core.windows.net/"
+        elif stage == 'gold':
+            warehouse_path = f"abfs://{self.gold_container}@{self.account_name}.dfs.core.windows.net/"
         return SqlCatalog(
             name="test",
             identifier="default",
             file_io=file_io,
             **{
-                "uri": "sqlite:///iceberg_catalog.db",
+                "uri": f"sqlite:///iceberg-{stage}.db",
                 "warehouse": warehouse_path,
                 "adls.connection-string": self.connection_string,
                 "adls.account-name": self.account_name,

@@ -11,7 +11,7 @@ from azure.storage.blob import BlobServiceClient
 import pandas as pd
 import pyarrow as pa
 from .resources import IcebergCatalogResource
-from .schemas import get_pyarrow_schema, ICEBERG_SCHEMA
+from .schemas import get_fabdata_pa_schema, get_fabreport_pa_schema, ICE_FAB_DATA, ICE_FAB_REPORT
 from pathlib import Path
 
 
@@ -24,18 +24,23 @@ class AzureConfig:
         }
         self.bronze_container = os.getenv("AZURE_BRONZE_CONTAINER_NAME")
         self.silver_container = os.getenv("AZURE_SILVER_CONTAINER_NAME")
+        self.gold_container = os.getenv("AZURE_GOLD_CONTAINER_NAME")
 
     @property
-    def warehouse_path(self):
+    def silver_path(self):
         return f"abfs://{self.silver_container}@{self.storage_options['account_name']}.dfs.core.windows.net/"
+
+    @property
+    def gold_path(self):
+        return f"abfs://{self.gold_container}@{self.storage_options['account_name']}.dfs.core.windows.net/"
 
 
 @asset(
-    description="Setup Iceberg catalog and create necessary tables",
+    description="Setup Iceberg Silver catalog and create necessary tables",
     group_name="infrastructure",
     compute_kind="python"
 )
-def setup_iceberg_tables(
+def setup_silver(
     context: AssetExecutionContext,
     iceberg_catalog: IcebergCatalogResource
 ):
@@ -44,7 +49,7 @@ def setup_iceberg_tables(
     This asset must run before any table operations.
     """
     # Get the catalog from the resource
-    catalog = iceberg_catalog.get_catalog()
+    catalog = iceberg_catalog.get_catalog('silver')
 
     try:
         # Create namespace if it doesn't exist
@@ -57,7 +62,7 @@ def setup_iceberg_tables(
         if not catalog.table_exists(table_identifier):
             catalog.create_table(
                 identifier=table_identifier,
-                schema=ICEBERG_SCHEMA,
+                schema=ICE_FAB_DATA,
                 properties={
                     "write.format.default": "parquet",
                     "write.metadata.compression-codec": "gzip",
@@ -67,6 +72,49 @@ def setup_iceberg_tables(
                 }
             )
             context.log.info("Created 'silver.fab_data' table")
+
+    except Exception as e:
+        context.log.error(f"Failed to setup Iceberg table: {str(e)}")
+        raise
+
+
+@asset(
+    description="Setup Iceberg Gold catalog and create necessary tables",
+    group_name="infrastructure",
+    compute_kind="python"
+)
+def setup_gold(
+    context: AssetExecutionContext,
+    iceberg_catalog: IcebergCatalogResource
+):
+    """
+    Initialize Iceberg catalog and create required tables.
+    This asset must run before any table operations.
+    """
+    # Get the catalog from the resource
+    catalog = iceberg_catalog.get_catalog('gold')
+
+    try:
+        # Create namespace if it doesn't exist
+        if "gold" not in [ns[0] for ns in catalog.list_namespaces()]:
+            catalog.create_namespace("gold")
+            context.log.info("Created 'gold' namespace")
+
+        # Create table if it doesn't exist
+        table_identifier = ("gold", "fab_report")
+        if not catalog.table_exists(table_identifier):
+            catalog.create_table(
+                identifier=table_identifier,
+                schema=ICE_FAB_REPORT,
+                properties={
+                    "write.format.default": "parquet",
+                    "write.metadata.compression-codec": "gzip",
+                    "write.metadata.metrics.default": "full",
+                    "write.metadata.metrics.column.counts": "true",
+                    "format-version": "2"
+                }
+            )
+            context.log.info("Created 'gold.fab_report' table")
 
     except Exception as e:
         context.log.error(f"Failed to setup Iceberg table: {str(e)}")
@@ -138,7 +186,7 @@ def ingest_raw_fab_data(context: AssetExecutionContext) -> Output[List[str]]:
     compute_kind="python",
     # required_resource_keys={"iceberg_catalog"}  # Explicitly declare resource dependency
 )
-def write_iceberg_table(
+def write_silver_fabdata(
     iceberg_catalog: IcebergCatalogResource,
     ingest_raw_fab_data: List[str]
 ) -> Output[None]:
@@ -151,7 +199,7 @@ def write_iceberg_table(
         ingest_raw_fab_data: List of processed file paths from the ingestion step
     """
     # Get the catalog from the resource
-    catalog = iceberg_catalog.get_catalog()
+    catalog = iceberg_catalog.get_catalog('silver')
     config = AzureConfig()
     table = catalog.load_table("silver.fab_data")
 
@@ -164,7 +212,6 @@ def write_iceberg_table(
     # Process files
     processed_count = 0
     failed_files = []
-    print(f"ingest data: {ingest_raw_fab_data}")
     for blob_name in ingest_raw_fab_data:
         try:
             # Check if file was already processed (idempotency check)
@@ -190,7 +237,7 @@ def write_iceberg_table(
             # Convert to PyArrow and write
             table_arrow = pa.Table.from_pandas(
                 df,
-                schema=get_pyarrow_schema()
+                schema=get_fabdata_pa_schema()
             )
 
             table.append(table_arrow)
@@ -214,3 +261,44 @@ def write_iceberg_table(
             "failed_files": MetadataValue.json(failed_files)
         }
     )
+
+
+@asset(
+    description="Transform bronze data to Iceberg format and ingest into silver layer",
+    freshness_policy=FreshnessPolicy(
+        maximum_lag_minutes=60,
+        cron_schedule="0 * * * *"
+    ),
+    group_name="aggregate",
+    compute_kind="python",
+    # required_resource_keys={"iceberg_catalog"}  # Explicitly declare resource dependency
+)
+def write_gold_fabreport(
+    iceberg_catalog: IcebergCatalogResource,
+) -> None:
+    """
+    Transform and load data from silver to gold layer using Iceberg format.
+
+    Args:
+        iceberg_catalog: The Iceberg catalog resource
+    """
+    # Get the catalog from the resource
+    gold_catalog = iceberg_catalog.get_catalog('gold')
+    silver_catalog = iceberg_catalog.get_catalog('silver')
+
+    fab_data = silver_catalog.load_table("silver.fab_data")
+    fab_report = gold_catalog.load_table("gold.fab_report")
+
+    con = fab_data.scan().to_duckdb(table_name="fabdata")
+    df_fab_report = con.execute(
+        """
+            SELECT tool, process_step, avg(temperature_c) as avg_temp, try_cast(min(defects_detected) as DOUBLE) as min_defects,
+            try_cast(max(defects_detected) as DOUBLE) as max_defects, current_localtimestamp() as processed_at
+            FROM fabdata group by tool, process_step
+        """
+    ).df()
+    pa_fab_report = pa.Table.from_pandas(
+        df_fab_report,
+        schema=get_fabreport_pa_schema()
+    )
+    fab_report.append(pa_fab_report)
