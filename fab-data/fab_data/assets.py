@@ -264,7 +264,7 @@ def write_silver_fabdata(
 
 
 @asset(
-    description="Transform bronze data to Iceberg format and ingest into silver layer",
+    description="Transform silver data with DuckDB to KPIs and load into gold layer",
     freshness_policy=FreshnessPolicy(
         maximum_lag_minutes=60,
         cron_schedule="0 * * * *"
