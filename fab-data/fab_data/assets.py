@@ -271,7 +271,7 @@ def write_silver_fabdata(
     ),
     group_name="aggregate",
     compute_kind="python",
-    # required_resource_keys={"iceberg_catalog"}  # Explicitly declare resource dependency
+    deps=[write_silver_fabdata]
 )
 def write_gold_fabreport(
     iceberg_catalog: IcebergCatalogResource,
