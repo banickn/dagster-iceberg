@@ -3,11 +3,14 @@ from dagster import Definitions, load_assets_from_modules
 from . import assets
 from .raw_sensor import raw_data_sensor
 from .resources import IcebergCatalogResource
+from .checks import ingest_data_quality
 
 iceberg = IcebergCatalogResource()
 all_assets = load_assets_from_modules([assets])
+
 defs = Definitions(
     assets=all_assets,
     resources={"iceberg_catalog": iceberg},
-    sensors=[raw_data_sensor]
+    sensors=[raw_data_sensor],
+    asset_checks=[ingest_data_quality]
 )

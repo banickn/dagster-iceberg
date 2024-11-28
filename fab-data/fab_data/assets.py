@@ -1,15 +1,18 @@
 import json
 import os
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Union, TextIO, Dict
 
+from azure.storage.blob._blob_client import BlobClient
+from azure.storage.blob._container_client import ContainerClient
 from dagster import (
-    asset, FreshnessPolicy, MetadataValue, Output,
-    AssetExecutionContext
+    asset, MetadataValue, Output, AssetExecutionContext, SkipReason
 )
 from azure.storage.blob import BlobServiceClient
 import pandas as pd
 import pyarrow as pa
+from pyiceberg.catalog.sql import SqlCatalog
+from pyiceberg.table import Table
 from .resources import IcebergCatalogResource
 from .schemas import get_fabdata_pa_schema, get_fabreport_pa_schema, ICE_FAB_DATA, ICE_FAB_REPORT
 from pathlib import Path
@@ -33,6 +36,57 @@ class AzureConfig:
     @property
     def gold_path(self):
         return f"abfs://{self.gold_container}@{self.storage_options['account_name']}.dfs.core.windows.net/"
+
+
+def load_json(file_or_path: Union[str, TextIO], mode: str = 'auto') -> List[Dict]:
+    """
+    Flexibly load JSON data from files or file-like objects.
+
+    Parameters:
+    - file_or_path: Either a file path or a file-like object
+    - mode: 'auto' (default), 'list', or 'jsonl'
+            'auto' attempts to detect the format
+            'list' expects a JSON list of objects
+            'jsonl' expects JSON Line Delimited file
+
+    Returns:
+    A list of dictionaries
+
+    Raises:
+    ValueError if the file cannot be parsed
+    """
+    if isinstance(file_or_path, str):
+        file = open(file_or_path, 'r')
+    else:
+        file: TextIO = file_or_path
+
+    try:
+        # Determine parsing mode
+        if mode == 'auto':
+            # Read the first few characters to detect format
+            first_char = file.read(1)
+            file.seek(0)  # Reset file pointer
+
+            if first_char == '[':
+                mode = 'list'
+            else:
+                mode = 'jsonl'
+
+        # Parse based on mode
+        if mode == 'list':
+            # Standard JSON list of objects
+            return json.load(file)
+
+        elif mode == 'jsonl':
+            # JSON Lines format
+            return [json.loads(line.strip()) for line in file if line.strip()]
+
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON format: {e}")
+
+    finally:
+        if isinstance(file_or_path, str):
+            file.close()
 
 
 @asset(
@@ -123,10 +177,6 @@ def setup_gold(
 
 @asset(
     description="Processes incoming JSON files and loads them into the bronze data lake layer",
-    freshness_policy=FreshnessPolicy(
-        maximum_lag_minutes=60,
-        cron_schedule="0 * * * *"
-    ),
     group_name="ingestion",
     compute_kind="python",
     config_schema={"filename": str}  # Add config schema for filename
@@ -149,7 +199,7 @@ def ingest_raw_fab_data(context: AssetExecutionContext) -> Output[List[str]]:
         raise FileNotFoundError(f"Input file not found: {file_path}")
 
     with open(file_path) as f:
-        data = json.load(f)
+        data = load_json(f, mode="jsonl")
         blob_service_client = BlobServiceClient.from_connection_string(config.storage_options["connection_string"])
         blob_client = blob_service_client.get_blob_client(
             container=config.bronze_container, blob=filename)
@@ -164,7 +214,7 @@ def ingest_raw_fab_data(context: AssetExecutionContext) -> Output[List[str]]:
         except Exception as e:
             print(f"Failed to process {filename}: {str(e)}")
             failed_files.append(filename)
-        print(MetadataValue.json(processed_in_this_run))
+            raise SkipReason("failed to process file: {str(e)}")
         return Output(
             processed_in_this_run,
             metadata={
@@ -178,10 +228,6 @@ def ingest_raw_fab_data(context: AssetExecutionContext) -> Output[List[str]]:
 
 @asset(
     description="Transform bronze data to Iceberg format and ingest into silver layer",
-    freshness_policy=FreshnessPolicy(
-        maximum_lag_minutes=60,
-        cron_schedule="0 * * * *"
-    ),
     group_name="ingestion",
     compute_kind="python",
     # required_resource_keys={"iceberg_catalog"}  # Explicitly declare resource dependency
@@ -199,15 +245,15 @@ def write_silver_fabdata(
         ingest_raw_fab_data: List of processed file paths from the ingestion step
     """
     # Get the catalog from the resource
-    catalog = iceberg_catalog.get_catalog('silver')
+    catalog: SqlCatalog = iceberg_catalog.get_catalog('silver')
     config = AzureConfig()
-    table = catalog.load_table("silver.fab_data")
+    table: Table = catalog.load_table("silver.fab_data")
 
     # Initialize Azure client for reading from bronze
-    blob_service_client = BlobServiceClient.from_connection_string(
+    blob_service_client: BlobServiceClient = BlobServiceClient.from_connection_string(
         config.storage_options["connection_string"]
     )
-    container_client = blob_service_client.get_container_client(config.bronze_container)
+    container_client: ContainerClient = blob_service_client.get_container_client(config.bronze_container)
 
     # Process files
     processed_count = 0
@@ -222,8 +268,8 @@ def write_silver_fabdata(
                 continue
 
             # Process the file
-            blob_client = container_client.get_blob_client(blob_name)
-            json_data = blob_client.download_blob().readall()
+            blob_client: BlobClient = container_client.get_blob_client(blob_name)
+            json_data: bytes = blob_client.download_blob().readall()
 
             # Transform data
             data = json.loads(json_data)
@@ -265,10 +311,6 @@ def write_silver_fabdata(
 
 @asset(
     description="Transform silver data with DuckDB to KPIs and load into gold layer",
-    freshness_policy=FreshnessPolicy(
-        maximum_lag_minutes=60,
-        cron_schedule="0 * * * *"
-    ),
     group_name="aggregate",
     compute_kind="python",
     deps=[write_silver_fabdata]
