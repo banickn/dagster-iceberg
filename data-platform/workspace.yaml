@@ -1,0 +1,7 @@
+load_from:
+    - python_module:
+        module_name: jaffle_dagster
+        working_directory: fab_dbt/jaffle_shop/jaffle_dagster/
+    - python_module:
+        module_name: fab_data
+        working_directory: fab_data

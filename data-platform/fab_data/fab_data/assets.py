@@ -19,22 +19,22 @@ from pathlib import Path
 
 
 class AzureConfig:
-    def __init__(self):
-        self.storage_options = {
+    def __init__(self) -> None:
+        self.storage_options: Dict[str, str | None] = {
             "connection_string": os.getenv("AZURE_CONNECTION_STRING"),
             "account_name": os.getenv("AZURE_STORAGE_ACCOUNT_NAME"),
             "account_key": os.getenv("AZURE_STORAGE_ACCOUNT_KEY")
         }
-        self.bronze_container = os.getenv("AZURE_BRONZE_CONTAINER_NAME")
-        self.silver_container = os.getenv("AZURE_SILVER_CONTAINER_NAME")
-        self.gold_container = os.getenv("AZURE_GOLD_CONTAINER_NAME")
+        self.bronze_container: str | None = os.getenv("AZURE_BRONZE_CONTAINER_NAME")
+        self.silver_container: str | None = os.getenv("AZURE_SILVER_CONTAINER_NAME")
+        self.gold_container: str | None = os.getenv("AZURE_GOLD_CONTAINER_NAME")
 
     @property
-    def silver_path(self):
+    def silver_path(self) -> str:
         return f"abfs://{self.silver_container}@{self.storage_options['account_name']}.dfs.core.windows.net/"
 
     @property
-    def gold_path(self):
+    def gold_path(self) -> str:
         return f"abfs://{self.gold_container}@{self.storage_options['account_name']}.dfs.core.windows.net/"
 
 

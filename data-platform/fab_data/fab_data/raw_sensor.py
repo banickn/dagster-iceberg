@@ -22,7 +22,7 @@ def get_files_in_directory(directory: str) -> Set[str]:
     job=ingest_job,  # Use the job we defined above
     minimum_interval_seconds=30,  # Check every 30 seconds
 )
-def raw_data_sensor(context):
+def raw_data_sensor(context) -> SensorResult:
     """
     Sensor that monitors the raw_data directory for new JSON files.
     Triggers the ingest_raw_fab_data job when new files are detected.
@@ -32,7 +32,7 @@ def raw_data_sensor(context):
 
     # Get current files in directory
     current_files = get_files_in_directory(raw_data_dir)
-
+    print(current_files)
     # Get previously processed files from cursor
     cursor_str = context.cursor or ""
     processed_files = set(cursor_str.split(",")) if cursor_str else set()
